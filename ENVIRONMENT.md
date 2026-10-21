@@ -6,14 +6,16 @@
 
 | 项目 | 要求 |
 |---|---|
-| Python | 3.11 或更高；当前本机验证版本为 3.12.2 |
-| 系统 | Windows、Linux、macOS；本轮在 Windows 验证，Linux/macOS 尚未实机验证 |
+| Python | 3.11 或更高；CI 覆盖 Python 3.11/3.12，本机验证版本为 3.12.2 |
+| 系统 | Windows、Linux、macOS；三个系统的安装、CLI 自检和离线行为测试均已通过 GitHub Actions 验证 |
 | Python 环境 | 推荐独立 venv；包含 pip 和 venv 模块 |
 | 网络 | 安装时访问 Python 包索引；运行时 HTTPS 访问所用的 Apple/CalDAV/Microsoft 服务 |
 | 账号 | 日历使用 CalDAV 应用密码或 Microsoft 设备码登录；提醒事项使用 Apple 账号及双重认证 |
 | 运行身份 | 登录和 harness 使用同一操作系统用户、profile、状态目录；不要以管理员/root 身份代替普通用户运行 |
 
 运行依赖由 `pyproject.toml` 声明，`pip install .` 按当前操作系统安装。`pyicloud` 固定为 2.6.5，因提醒事项使用其 CloudKit 接口。无需 Go、Node、iCloud 桌面客户端或 OpenClaw。Python 依赖中存在本机扩展；若当前 Python/CPU 组合没有预编译依赖，需要对应编译工具链，建议先使用常见平台的 Python 3.12 环境。
+
+[首次六组 CI 验证记录](https://github.com/Austrust/harness-productivity-cli/actions/runs/39643524539)。CI 使用模拟服务，不验证真实账号、macOS 钥匙串授权、Linux Secret Service 服务部署、iPhone 同步或手机通知；这些项目按下面的本地环境说明和 README 中的真实账户验收步骤检查。
 
 ## Windows / PowerShell
 
