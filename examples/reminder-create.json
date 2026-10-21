@@ -1,0 +1,8 @@
+{
+  "request_id": "example-2026-10-23-reminder-1",
+  "list": "工作",
+  "title": "提交实验报告",
+  "due": "2026-10-23T20:00:00+08:00",
+  "priority": "high",
+  "notify": true
+}
