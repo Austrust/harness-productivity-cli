@@ -40,6 +40,10 @@ mailcal --profile icloud calendars
 
 密码在隐藏提示中输入，存入系统凭证存储：Windows DPAPI、macOS Keychain 或 Linux Secret Service。其他支持 Basic／应用密码认证的 CalDAV 服务可以替换 server 和 username。仅有 IMAP/SMTP 的邮箱不能用于日历；本版本不实现 Google Calendar 的 OAuth 登录。
 
+中国大陆 iCloud 日历也可显式使用 `--server https://caldav.icloud.com.cn`。从 0.2.1 起，Apple HTTPS 域名 `icloud.com` 与 `icloud.com.cn` 之间的地址发现和跳转均受支持；其他 CalDAV 服务仍只信任配置的服务器地址和端口。
+
+如果 0.2.0 报 `Refused CalDAV URL outside the configured trusted hosts`，在仓库目录执行 `git pull --ff-only`，再用原虚拟环境的 Python 执行 `-m pip install --upgrade .`，确认 `mailcal --version` 为 0.2.1 或更高后重试原登录命令。新的拦截错误包含 `configured_origin`、`blocked_origin` 和 `caldav_stage`，只报告域名/端口和请求阶段，不输出用户路径、查询参数或密码。若仍失败，用这三个字段排查实际跳转目标；该错误本身不表示密码错误。
+
 ### Outlook / Microsoft 365
 
 1. 在 Microsoft Entra 注册一个你自己的应用。个人 Outlook.com 账户需要应用受众包含个人 Microsoft 账户；组织账户按租户策略配置。

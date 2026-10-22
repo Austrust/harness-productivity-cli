@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-productivity-cli"
-version = "0.2.0"
+version = "0.2.1"
 description = "Verified calendar and iOS Reminders CLIs for agent harnesses"
 readme = "README.md"
 license = "MIT"

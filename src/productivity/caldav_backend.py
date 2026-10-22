@@ -13,6 +13,24 @@ DAV = "{DAV:}"
 CAL = "{urn:ietf:params:xml:ns:caldav}"
 
 
+def icloud_host(host):
+    return bool(host) and any(host == suffix or host.endswith("." + suffix)
+                              for suffix in ("icloud.com", "icloud.com.cn"))
+
+
+def safe_origin(url):
+    """Diagnostics must omit userinfo, account-specific paths, queries and fragments."""
+    try:
+        u = urlparse(url)
+        host = u.hostname
+        if not host:
+            return "<invalid-origin>"
+        host = "[" + host + "]" if ":" in host else host
+        return u.scheme + "://" + host + (":" + str(u.port) if u.port else "")
+    except ValueError:
+        return "<invalid-origin>"
+
+
 def xml(text):
     if len(text) > 12_000_000 or "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
         raise Problem("server_error", "Unsupported or oversized XML response")
@@ -30,26 +48,38 @@ class CalDAV:
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise Problem("invalid_input", "CalDAV server must be HTTPS without embedded credentials")
         self.host = parsed.hostname
+        try:
+            self.port = parsed.port or 443
+        except ValueError:
+            raise Problem("invalid_input", "Invalid CalDAV server port") from None
         self.auth = (cfg["username"], password)
         self.session = session or requests.Session()
         self.tz = cfg.get("timezone", "Asia/Shanghai")
         self._calendars = None
 
     def trusted(self, url):
-        u = urlparse(url)
-        if u.scheme != "https" or u.username or u.password:
-            return False
-        if u.hostname == self.host:
-            return True
-        for suffix in ("icloud.com", "icloud.com.cn"):
-            if (self.host == suffix or self.host.endswith("." + suffix)) and (u.hostname == suffix or (u.hostname or "").endswith("." + suffix)):
+        try:
+            u = urlparse(url)
+            if u.scheme != "https" or not u.hostname or u.username or u.password or "\\" in u.netloc:
+                return False
+            port = u.port or 443
+            if u.hostname == self.host and port == self.port:
                 return True
-        return False
+            # iCloud discovery can cross the global/mainland domains. Accept only
+            # these two Apple namespaces over the standard HTTPS port.
+            return icloud_host(self.host) and icloud_host(u.hostname) and port == 443
+        except ValueError:
+            return False
 
-    def request(self, method, url, *, body=None, headers=None):
+    def require_trusted(self, url, stage):
+        if not self.trusted(url):
+            raise Problem("server_error", "Refused CalDAV URL outside the configured trusted hosts",
+                          details={"configured_origin":safe_origin(self.root), "blocked_origin":safe_origin(url),
+                                   "caldav_stage":stage})
+
+    def request(self, method, url, *, body=None, headers=None, stage=None):
         for _ in range(6):
-            if not self.trusted(url):
-                raise Problem("server_error", "Refused CalDAV URL outside the configured trusted hosts")
+            self.require_trusted(url, stage or method.lower())
             try:
                 r = self.session.request(method, url, data=body, auth=self.auth, headers=headers or {},
                                          timeout=(10, 30), allow_redirects=False)
@@ -58,7 +88,7 @@ class CalDAV:
             if r.status_code in (301, 302, 303, 307, 308):
                 if not r.headers.get("Location"):
                     break
-                url = urljoin(url, r.headers["Location"])
+                url = urljoin(url, r.headers["Location"].strip())
                 continue
             if r.status_code in (401, 403):
                 raise Problem("needs_login", "CalDAV credentials rejected or access denied; run auth", exit_code=2)
@@ -73,13 +103,13 @@ class CalDAV:
             return r, url
         raise Problem("server_error", "Too many CalDAV redirects")
 
-    def propfind(self, url, props, depth="0"):
+    def propfind(self, url, props, depth="0", *, stage=None):
         root = ET.Element(DAV + "propfind")
         prop = ET.SubElement(root, DAV + "prop")
         for p in props:
             ET.SubElement(prop, p)
         r, final = self.request("PROPFIND", url, body=ET.tostring(root),
-                                headers={"Depth": depth, "Content-Type":"application/xml; charset=utf-8"})
+                                headers={"Depth": depth, "Content-Type":"application/xml; charset=utf-8"}, stage=stage)
         return xml(r.text), final
 
     @staticmethod
@@ -95,16 +125,16 @@ class CalDAV:
     def calendars(self):
         if self._calendars is not None:
             return self._calendars
-        tree, final = self.propfind(self.root, [DAV + "current-user-principal"])
+        tree, final = self.propfind(self.root, [DAV + "current-user-principal"], stage="principal_lookup")
         href = tree.findtext(".//" + DAV + "current-user-principal/" + DAV + "href")
-        principal = urljoin(final, href) if href else final
-        tree, final = self.propfind(principal, [CAL + "calendar-home-set"])
+        principal = urljoin(final, href.strip()) if href else final
+        tree, final = self.propfind(principal, [CAL + "calendar-home-set"], stage="calendar_home_lookup")
         href = tree.findtext(".//" + CAL + "calendar-home-set/" + DAV + "href")
         if not href:
             raise Problem("server_error", "Server did not expose calendar-home-set")
-        home = urljoin(final, href)
+        home = urljoin(final, href.strip())
         tree, final = self.propfind(home, [DAV+"displayname", DAV+"resourcetype", CAL+"supported-calendar-component-set",
-                                           DAV+"current-user-privilege-set"], "1")
+                                           DAV+"current-user-privilege-set"], "1", stage="calendar_list")
         out = []
         for response in tree.findall(DAV + "response"):
             props = self.properties(response)
@@ -117,9 +147,8 @@ class CalDAV:
             href = response.findtext(DAV + "href")
             if not href:
                 continue
-            url = urljoin(final, href).rstrip("/") + "/"
-            if not self.trusted(url):
-                raise Problem("server_error", "Calendar href is outside the trusted server")
+            url = urljoin(final, href.strip()).rstrip("/") + "/"
+            self.require_trusted(url, "calendar_href")
             priv = props.get(DAV + "current-user-privilege-set")
             writable = priv is None or any(priv.find(".//" + DAV + p) is not None for p in ("write", "write-content", "all"))
             display = props.get(DAV + "displayname")
