@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import functools
+import re
 import sys
 import time
 import uuid
@@ -10,45 +11,116 @@ import uuid
 from .common import Problem, UTC, choose, iso, zone
 
 
+def auth_call(cfg, stage, action):
+    """Expose structured diagnostics, never provider messages/response bodies."""
+    try:
+        return action()
+    except Problem:
+        raise
+    except Exception as exc:
+        import requests
+        from pyicloud.exceptions import PyiCloudAcceptTermsException
+        chain, pending = [], [exc]
+        while pending and len(chain) < 8:
+            error = pending.pop(0)
+            if any(error is previous for previous in chain):
+                continue
+            chain.append(error)
+            pending.extend(x for x in (error.__cause__, error.__context__, *error.args) if isinstance(x, BaseException))
+        details = {"auth_stage":stage, "auth_region":"china_mainland" if cfg.get("china_mainland") else "global",
+                   "exception_types":list(dict.fromkeys(type(error).__name__ for error in chain))}
+        for error in chain:
+            response = getattr(error, "response", None)
+            status = getattr(response, "status_code", None)
+            if type(status) is int and 100 <= status <= 599:
+                details["http_status"] = status
+                break
+            code = getattr(error, "code", None)
+            if type(code) is int and 100 <= code <= 599:
+                details["http_status"] = code
+                break
+        if any(isinstance(error, PyiCloudAcceptTermsException) for error in chain):
+            code, message = "icloud_action_required", "Open iCloud in a browser and complete the account's required terms/setup, then retry auth"
+        elif any(isinstance(error, (requests.Timeout, requests.ConnectionError)) for error in chain):
+            code, message = "network_error", "iCloud authentication connection failed; check network, proxy and certificate settings"
+        else:
+            code, message = "needs_login", "iCloud authentication is incomplete; run auth locally with the Apple account password and correct region"
+        raise Problem(code, message, details=details, exit_code=2) from None
+
+
+def needs_two_factor(api):
+    # pyicloud 2.6.5 can have a pending HSA2 challenge before dsInfo.hsaVersion
+    # arrives. Its public requires_2fa then returns False despite this MFA flag.
+    return bool(getattr(api, "requires_2fa", False) or getattr(api, "_requires_mfa", False))
+
+
 def icloud_session(state,cfg,*,password=None):
     from pyicloud import PyiCloudService
     # authenticate=False avoids the library's implicit keyring lookup or startup network requests.
-    api=PyiCloudService(cfg["apple_id"],password,cookie_directory=str(state.path/"icloud-session"),
-                        china_mainland=cfg.get("china_mainland",False),authenticate=False)
+    api=auth_call(cfg,"session_setup",lambda: PyiCloudService(cfg["apple_id"],password,cookie_directory=str(state.path/"icloud-session"),
+                        china_mainland=cfg.get("china_mainland",False),authenticate=False))
     old=api.session.request
     def request(*args,**kwargs):
         if kwargs.get("timeout") is None: kwargs["timeout"]=(10,30)
         return old(*args,**kwargs)
     api.session.request=request
-    try:
-        api.authenticate()
-    except Exception:
-        raise Problem("needs_login","iCloud session unavailable; run ios-reminders auth interactively",exit_code=2) from None
+    auth_call(cfg,"authentication",api.authenticate)
     return api
+
+
+def complete_two_factor(api, cfg):
+    if getattr(api,"requires_2sa",False) and not getattr(api,"requires_2fa",False):
+        raise Problem("unsupported_auth", "Legacy two-step authentication is unsupported; use Apple two-factor authentication", exit_code=2)
+    if not sys.stdin.isatty():
+        raise Problem("interactive_required","Complete 2FA in an interactive terminal",exit_code=2)
+    method = auth_call(cfg,"code_delivery",lambda: api.two_factor_delivery_method)
+    if method == "security_key":
+        raise Problem("unsupported_auth", "This CLI supports verification codes; hardware security-key authentication is not implemented", exit_code=2)
+    auth_call(cfg,"code_delivery",api.request_2fa_code)
+    print("Approve this sign-in on your Apple device, then enter the code sent for this sign-in.",file=sys.stderr,flush=True)
+    print("Enter the 6-digit Apple verification code: ",file=sys.stderr,end="",flush=True)
+    try:
+        code = input().strip()
+    except EOFError:
+        raise Problem("interactive_required","Verification input ended; rerun auth in a local interactive terminal",exit_code=2) from None
+    if not re.fullmatch(r"[0-9]{6}",code):
+        raise Problem("invalid_input","Apple verification code must contain exactly six digits")
+    if not auth_call(cfg,"code_verification",lambda: api.validate_2fa_code(code)):
+        raise Problem("auth_failed","Apple verification code rejected; rerun auth to request a new challenge",exit_code=2)
+    if not api.is_trusted_session and not auth_call(cfg,"session_trust",api.trust_session):
+        raise Problem("auth_failed","Apple session could not be trusted",exit_code=2)
 
 
 def icloud_login(state,cfg,password):
     state.initialize()
     api=icloud_session(state,cfg,password=password)
-    if api.requires_2fa:
-        if not sys.stdin.isatty():
-            raise Problem("interactive_required","Complete 2FA in an interactive terminal",exit_code=2)
-        print("Enter the 6-digit Apple verification code: ",file=sys.stderr,end="",flush=True)
-        code=input().strip()
-        if not api.validate_2fa_code(code): raise Problem("auth_failed","Apple verification code rejected")
-        if not api.is_trusted_session and not api.trust_session():
-            raise Problem("auth_failed","Apple session could not be trusted")
+    verified_code = False
+    if needs_two_factor(api):
+        complete_two_factor(api,cfg)
+        verified_code = True
     elif getattr(api,"requires_2sa",False):
-        raise Problem("auth_failed","Legacy two-step authentication is unsupported; use Apple two-factor authentication")
+        raise Problem("unsupported_auth","Legacy two-step authentication is unsupported; use Apple two-factor authentication",exit_code=2)
+    # A separate server validation is required even if authenticate() returned.
+    # Do not call this before handling a pending challenge: the library clears
+    # challenge state when its partial session does not yet have a webauth cookie.
+    status = auth_call(cfg,"session_validation",api.get_auth_status)
+    if not verified_code and status.get("authenticated") and (status.get("requires_2fa") or not status.get("trusted_session")):
+        complete_two_factor(api,cfg)
+        verified_code = True
+        status = auth_call(cfg,"session_validation",api.get_auth_status)
+    if not status.get("authenticated") or not status.get("trusted_session") or status.get("requires_2fa") or status.get("requires_2sa") or needs_two_factor(api):
+        raise Problem("needs_login","Apple did not confirm a fully authenticated trusted session; rerun auth locally",
+                      details={"auth_stage":"session_validation", "auth_region":"china_mainland" if cfg.get("china_mainland") else "global"},exit_code=2)
     state.save("reminders",cfg)
-    return {"authenticated":True,"apple_id":cfg["apple_id"],"password_stored":False}
+    return {"authenticated":True,"session_verified":True,"two_factor_completed":verified_code,
+            "apple_id":cfg["apple_id"],"password_stored":False}
 
 
 class IOSReminders:
     def __init__(self,state,cfg,*,api=None):
         self.state,self.cfg,self.tz=state,cfg,cfg.get("timezone","Asia/Shanghai")
         self.api=api or icloud_session(state,cfg)
-        if self.api.requires_2fa:
+        if needs_two_factor(self.api) or getattr(self.api,"requires_2sa",False):
             raise Problem("needs_login","Apple session expired; run ios-reminders auth interactively",exit_code=2)
         self.service=self.api.reminders
 

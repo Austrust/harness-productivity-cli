@@ -98,7 +98,8 @@ def test_cli_does_not_leak_provider_exception(monkeypatch,capsys):
 def test_icloud_login_saves_owner_account_and_never_password(tmp_path,monkeypatch):
     import productivity.reminders_backend as rb
     state=State(tmp_path);state.path.mkdir(parents=True)
-    monkeypatch.setattr(rb,"icloud_session",lambda *a,**k:NS(requires_2fa=False,requires_2sa=False))
+    monkeypatch.setattr(rb,"icloud_session",lambda *a,**k:NS(requires_2fa=False,requires_2sa=False,
+        get_auth_status=lambda: {"authenticated":True,"trusted_session":True}))
     rb.icloud_login(state,{"apple_id":"fake@example.invalid","timezone":"Asia/Shanghai"},"SENSITIVE")
     cfg=state.load("reminders")
     assert cfg["apple_id"]=="fake@example.invalid"

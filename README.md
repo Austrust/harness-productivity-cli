@@ -69,6 +69,10 @@ ios-reminders lists
 
 这里输入 Apple 账户密码，并按提示输入双重认证验证码，不能使用日历的应用专用密码。密码不保存；会话保存在当前操作系统用户的受限目录。中国大陆 iCloud 账户可在 auth 时增加 `--china-mainland`。Apple 条款、网页访问/安全设置或接口变化可能要求你先在 iCloud 网页完成操作；CLI 不会自动接受条款或修改安全设置。
 
+从 0.2.2 起，CLI 会识别缺少账户元数据时仍在等待的双重认证挑战，主动请求验证码并在同一个 auth 进程中等待输入六位数字。成功前会独立请求服务器验证会话；只有已认证、受信任且没有待完成验证码的会话才会保存配置并返回 `authenticated: true`、`session_verified: true`。`two_factor_completed: true` 表示本次完成了验证码流程；如果已存在有效受信任会话，可以跳过验证码并返回 `two_factor_completed: false`。
+
+如果 0.2.1 或更早版本在没有验证码提示时返回成功，但紧接着 `lists` 返回 `needs_login`，升级并重新运行 auth。`auth`、`lists` 及后续操作须使用相同的 `--profile`；省略时为 `default`。新认证错误只提供 `auth_stage`、`auth_region`、异常类型及可获得的 HTTP 状态码，不输出底层异常正文、密码、Cookie 或验证码。当前认证支持验证码，不支持硬件安全密钥及旧式两步验证。
+
 ### 如果需要到点提醒：通知校准
 
 CloudKit 是非公开接口。本实现不猜测 Date 通知字段，而是从你手机创建的一条实际样本读取字段结构：
