@@ -73,6 +73,10 @@ ios-reminders lists
 
 如果 0.2.1 或更早版本在没有验证码提示时返回成功，但紧接着 `lists` 返回 `needs_login`，升级并重新运行 auth。`auth`、`lists` 及后续操作须使用相同的 `--profile`；省略时为 `default`。新认证错误只提供 `auth_stage`、`auth_region`、异常类型及可获得的 HTTP 状态码，不输出底层异常正文、密码、Cookie 或验证码。当前认证支持验证码，不支持硬件安全密钥及旧式两步验证。
 
+**中国大陆登录入口（0.2.3 起）：** `--china-mainland` 保留 `www.icloud.com.cn` 和 `setup.icloud.com.cn` 的数据区域，Apple 账户登录默认使用 `idmsa.apple.com`。此组合与 Apple 大陆 `setup/ws/1/validate` 接口在 2026-10-22 公开返回的 `configBag` 一致；大陆 IDMS 入口的 503 也有[上游问题记录](https://github.com/icloud-photos-downloader/icloud_photos_downloader/issues/1256)。这不表示所有 503 都由相同原因引起。
+
+默认 `--auth-host auto` 使用上述组合；可显式使用 `--auth-host global`。如需测试原来的大陆 Apple 登录入口，可选 `--auth-host china-mainland`。该选项只接受内置 Apple 域名，保存到当前 profile，不修改 CalDAV 配置，不自动更换网络或关闭证书校验。认证失败会同时报告 `apple_auth_host` 和 `icloud_setup_host`；登录入口与数据区域分别诊断，不自动反复重试登录。
+
 ### 如果需要到点提醒：通知校准
 
 CloudKit 是非公开接口。本实现不猜测 Date 通知字段，而是从你手机创建的一条实际样本读取字段结构：

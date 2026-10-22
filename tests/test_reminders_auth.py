@@ -180,3 +180,77 @@ def test_auth_errors_have_actionable_categories(failure, expected):
     with pytest.raises(Problem) as error:
         rb.auth_call(CFG, "authentication", fail)
     assert error.value.code == expected and "SENSITIVE" not in str(error.value)
+
+
+@pytest.mark.parametrize("mainland,selection,auth_host,setup_host", [
+    (True, None, "idmsa.apple.com", "setup.icloud.com.cn"),
+    (True, "global", "idmsa.apple.com", "setup.icloud.com.cn"),
+    (True, "china-mainland", "idmsa.apple.com.cn", "setup.icloud.com.cn"),
+    (False, "auto", "idmsa.apple.com", "setup.icloud.com"),
+])
+def test_real_session_routes_idms_separately_from_icloud_region(state, monkeypatch, mainland, selection, auth_host, setup_host):
+    cfg = {**CFG, "china_mainland":mainland}
+    if selection is not None:
+        cfg["auth_host"] = selection
+    calls = []
+
+    def send(adapter, prepared, **kwargs):
+        calls.append((prepared.url, prepared.headers.get("Origin"), kwargs.get("timeout")))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"{}"
+        response.headers["Content-Type"] = "application/json"
+        response.request = prepared
+        response.url = prepared.url
+        return response
+
+    def authenticate(api):
+        api.session.get(api._auth_endpoint + "/authorize/signin")
+        api.session.post(api._setup_endpoint + "/accountLogin", json={"dsWebAuthToken":"synthetic"})
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+    monkeypatch.setattr(PyiCloudService, "authenticate", authenticate)
+    api = rb.icloud_session(state, cfg, password="synthetic")
+    assert [url for url, _, _ in calls] == [f"https://{auth_host}/appleauth/auth/authorize/signin",
+                                          f"https://{setup_host}/setup/ws/1/accountLogin"]
+    expected_home = "https://www.icloud.com.cn" if mainland else "https://www.icloud.com"
+    assert api._home_endpoint == expected_home and api.is_china_mainland is mainland
+    assert all(origin == expected_home and timeout == (10, 30) for _, origin, timeout in calls)
+    assert api._get_auth_headers()["Referer"] == "https://" + auth_host
+
+
+def test_auth_host_selection_never_accepts_arbitrary_credential_destinations():
+    with pytest.raises(Problem) as error:
+        rb.apple_auth_host({**CFG, "auth_host":"https://untrusted.invalid"})
+    assert error.value.code == "invalid_input"
+
+
+def test_trust_failure_identifies_selected_apple_and_icloud_regions(state, monkeypatch):
+    api = pending_api()
+    api.is_trusted_session = False
+    api.validate_2fa_code = lambda code: True
+    api.trust_session = lambda: False
+    cfg = {**CFG, "china_mainland":True}
+    monkeypatch.setattr(rb, "icloud_session", lambda *args, **kwargs: api)
+    monkeypatch.setattr("sys.stdin", Terminal("123456\n"))
+    with pytest.raises(Problem) as error:
+        rb.icloud_login(state, cfg, "SENSITIVE")
+    assert error.value.details == {"auth_stage":"session_trust", "auth_region":"china_mainland",
+                                   "apple_auth_host":"idmsa.apple.com", "icloud_setup_host":"setup.icloud.com.cn"}
+    assert not (state.path / "reminders.json").exists()
+
+
+def test_cli_persists_requested_auth_host_selection(state, monkeypatch, capsys):
+    import productivity.cli as cli
+    seen = {}
+    monkeypatch.setattr(cli, "password", lambda args: "synthetic")
+
+    def login(profile, cfg, password):
+        seen.update(cfg)
+        return {"authenticated":True, "session_verified":True}
+
+    monkeypatch.setattr(rb, "icloud_login", login)
+    assert cli.main("ios-reminders", ["--state-dir",str(state.path.parent),"auth","--apple-id",CFG["apple_id"],
+                                     "--china-mainland","--auth-host","global"]) == 0
+    assert seen["china_mainland"] is True and seen["auth_host"] == "global"
+    assert "synthetic" not in capsys.readouterr().out

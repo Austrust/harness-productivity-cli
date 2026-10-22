@@ -38,6 +38,8 @@ def parser(tool):
     else:
         auth.add_argument("--apple-id",required=True)
         auth.add_argument("--china-mainland",action="store_true")
+        auth.add_argument("--auth-host",choices=["auto","global","china-mainland"],default="auto",
+                          help="Apple ID login host; auto uses global IDMS and retains the selected iCloud data region")
     sub.add_parser("status",help="Check saved login without interactive prompts")
     sub.add_parser("logout",help="Remove local login state; does not revoke provider-wide access")
     sub.add_parser("capabilities",help="Machine-readable supported operations")
@@ -170,7 +172,8 @@ def run(tool,args):
             state.secret_set("caldav-password",pw); state.save("calendar",cfg)
             return {"authenticated":True,"provider":"caldav","calendars":calendars}
         from .reminders_backend import icloud_login
-        return icloud_login(state,{"apple_id":args.apple_id,"timezone":args.timezone,"china_mainland":args.china_mainland},password(args))
+        return icloud_login(state,{"apple_id":args.apple_id,"timezone":args.timezone,"china_mainland":args.china_mainland,
+                                  "auth_host":args.auth_host},password(args))
     if args.command=="logout":
         # Deliberately local-only, and leave the idempotency journal intact.
         import shutil

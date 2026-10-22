@@ -11,6 +11,28 @@ import uuid
 from .common import Problem, UTC, choose, iso, zone
 
 
+def apple_auth_host(cfg):
+    selection = cfg.get("auth_host", "auto")
+    if selection not in {"auto", "global", "china-mainland"}:
+        raise Problem("invalid_input", "Invalid Apple authentication host selection")
+    # Apple's mainland setup/validate configBag advertises idmsa.apple.com
+    # for accountLoginUI/accountAuthorizeUI, while accountLogin remains .com.cn.
+    return "idmsa.apple.com.cn" if selection == "china-mainland" else "idmsa.apple.com"
+
+
+def auth_context(cfg, stage):
+    return {"auth_stage":stage, "auth_region":"china_mainland" if cfg.get("china_mainland") else "global",
+            "apple_auth_host":apple_auth_host(cfg),
+            "icloud_setup_host":"setup.icloud.com.cn" if cfg.get("china_mainland") else "setup.icloud.com"}
+
+
+def configure_auth_host(api, cfg):
+    # pyicloud is pinned: override only its IDMS login endpoints. Keep mainland
+    # home/setup endpoints and the session's Origin/Referer unchanged.
+    api._idmsa_endpoint = "https://" + apple_auth_host(cfg)
+    api._auth_endpoint = api._idmsa_endpoint + "/appleauth/auth"
+
+
 def auth_call(cfg, stage, action):
     """Expose structured diagnostics, never provider messages/response bodies."""
     try:
@@ -27,7 +49,7 @@ def auth_call(cfg, stage, action):
                 continue
             chain.append(error)
             pending.extend(x for x in (error.__cause__, error.__context__, *error.args) if isinstance(x, BaseException))
-        details = {"auth_stage":stage, "auth_region":"china_mainland" if cfg.get("china_mainland") else "global",
+        details = {**auth_context(cfg, stage),
                    "exception_types":list(dict.fromkeys(type(error).__name__ for error in chain))}
         for error in chain:
             response = getattr(error, "response", None)
@@ -59,6 +81,7 @@ def icloud_session(state,cfg,*,password=None):
     # authenticate=False avoids the library's implicit keyring lookup or startup network requests.
     api=auth_call(cfg,"session_setup",lambda: PyiCloudService(cfg["apple_id"],password,cookie_directory=str(state.path/"icloud-session"),
                         china_mainland=cfg.get("china_mainland",False),authenticate=False))
+    configure_auth_host(api,cfg)
     old=api.session.request
     def request(*args,**kwargs):
         if kwargs.get("timeout") is None: kwargs["timeout"]=(10,30)
@@ -88,7 +111,7 @@ def complete_two_factor(api, cfg):
     if not auth_call(cfg,"code_verification",lambda: api.validate_2fa_code(code)):
         raise Problem("auth_failed","Apple verification code rejected; rerun auth to request a new challenge",exit_code=2)
     if not api.is_trusted_session and not auth_call(cfg,"session_trust",api.trust_session):
-        raise Problem("auth_failed","Apple session could not be trusted",exit_code=2)
+        raise Problem("auth_failed","Apple session could not be trusted",details=auth_context(cfg,"session_trust"),exit_code=2)
 
 
 def icloud_login(state,cfg,password):
@@ -110,7 +133,7 @@ def icloud_login(state,cfg,password):
         status = auth_call(cfg,"session_validation",api.get_auth_status)
     if not status.get("authenticated") or not status.get("trusted_session") or status.get("requires_2fa") or status.get("requires_2sa") or needs_two_factor(api):
         raise Problem("needs_login","Apple did not confirm a fully authenticated trusted session; rerun auth locally",
-                      details={"auth_stage":"session_validation", "auth_region":"china_mainland" if cfg.get("china_mainland") else "global"},exit_code=2)
+                      details=auth_context(cfg,"session_validation"),exit_code=2)
     state.save("reminders",cfg)
     return {"authenticated":True,"session_verified":True,"two_factor_completed":verified_code,
             "apple_id":cfg["apple_id"],"password_stored":False}
